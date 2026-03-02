@@ -200,13 +200,53 @@ app.layout = html.Div(
 
 # ── Data loading helpers ──────────────────────────────────────────────────────
 
-def _load_model_outputs(config_path: str = "config/settings.yaml", force_refresh: bool = False):
+def _resolve_config_path() -> str:
+    """
+    Return a valid config path, preferring the file but falling back to
+    an in-memory config built from environment variables.
+
+    On Vercel (and similar platforms) the settings file is absent; set the
+    FRED_API_KEY environment variable instead.
+    """
+    import os
+
+    file_path = "config/settings.yaml"
+    if os.path.exists(file_path):
+        return file_path
+
+    # Generate a temporary config from env vars so the pipeline can start.
+    fred_key = os.environ.get("FRED_API_KEY", "")
+    if not fred_key:
+        raise EnvironmentError(
+            "No config/settings.yaml found and FRED_API_KEY env var is not set. "
+            "Add FRED_API_KEY to your Vercel environment variables."
+        )
+
+    import tempfile, yaml
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", delete=False
+    )
+    yaml.dump(
+        {
+            "fred": {"api_key": fred_key},
+            "data": {"cache_dir": "/tmp/mdr_cache", "start_date": "2010-01-01"},
+            "model": {},
+        },
+        tmp,
+    )
+    tmp.close()
+    return tmp.name
+
+
+def _load_model_outputs(config_path: str | None = None, force_refresh: bool = False):
     """
     Run the full model pipeline and return all outputs as a dict.
 
     This is called lazily on first render or on refresh.
     """
     from src.data.pipeline import DataPipeline
+
+    config_path = config_path or _resolve_config_path()
     from src.indicators.leading import build_leading_index
     from src.indicators.coincident import build_coincident_index
     from src.indicators.lagging import build_lagging_index
@@ -294,7 +334,7 @@ def load_model(n_clicks):
     force = n_clicks > 0 and bool(_model_cache)
     try:
         if not _model_cache or force:
-            _model_cache = _load_model_outputs(force_refresh=force)
+            _model_cache = _load_model_outputs(config_path=None, force_refresh=force)
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         return {"loaded": True}, f"Last updated: {now}", ""
     except Exception as exc:
