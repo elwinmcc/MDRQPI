@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: mdr-v5
+    runtime: python
+    buildCommand: pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+    startCommand: gunicorn -w 1 --timeout 300 wsgi:application
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: FRED_API_KEY
+        sync: false
