@@ -1,14 +1,13 @@
 """
 MDR v5 — Dash Web Application.
 
-Single-page dashboard with:
-  - Fan chart (price projection + scenario tree)
-  - LI / CI / LaI index panel
-  - Wavelet scalogram (power spectrum)
-  - CCF bar chart (lag structure)
-  - Turning point timeline
-  - Scenario summary table
-  - LaI maturity gauge
+Single-page dashboard focused on data and scoring:
+  - Cycle Scorecard (phase, LI, CI, LaI)
+  - LI + LaI component signal tables
+  - Cycle timing block (phase duration, dominant period, lead time)
+  - Scenario projection table (bull / base / bear targets + timeframes)
+  - Model stats panel
+  - Fan chart (single price-projection chart)
 
 Usage::
 
@@ -16,7 +15,8 @@ Usage::
     # or
     python -m src.dashboard.app --config config/settings.yaml --port 8050
 
-Dash runs in debug mode locally. In production, use gunicorn:
+In production::
+
     gunicorn -w 1 src.dashboard.app:server
 """
 
@@ -31,8 +31,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, callback, dcc, html, no_update
-from plotly.subplots import make_subplots
+from dash import Dash, Input, Output, dcc, html
 
 logger = logging.getLogger(__name__)
 
@@ -43,96 +42,135 @@ app = Dash(
     title="MDR v5 — Bitcoin Cyclical Projection",
     suppress_callback_exceptions=True,
 )
-server = app.server  # Expose Flask server for gunicorn
+server = app.server  # Expose Flask server for gunicorn / Vercel
 
-DARK_STYLE = {
-    "backgroundColor": "#1a1a2e",
-    "color": "#e0e0e0",
-    "fontFamily": "JetBrains Mono, Courier New, monospace",
-}
+# ── Theme tokens ─────────────────────────────────────────────────────────────
 
+BG      = "#1a1a2e"
+BG2     = "#16213e"
+BORDER  = "rgba(255,255,255,0.1)"
+TEXT    = "#e0e0e0"
+GRAY    = "#9e9e9e"
+GREEN   = "#26a69a"
+RED     = "#ef5350"
+AMBER   = "#ffa726"
+BLUE    = "#42a5f5"
+FONT    = "JetBrains Mono, Courier New, monospace"
+
+DARK_STYLE = {"backgroundColor": BG, "color": TEXT, "fontFamily": FONT}
 CARD_STYLE = {
     **DARK_STYLE,
-    "border": "1px solid rgba(255,255,255,0.1)",
+    "border": f"1px solid {BORDER}",
     "borderRadius": "8px",
     "padding": "16px",
     "margin": "8px",
 }
 
+# ── Layout helpers ────────────────────────────────────────────────────────────
 
-# ── Layout ─────────────────────────────────────────────────────────────────────
+def _placeholder(msg: str = "Load model to see data.") -> html.P:
+    return html.P(msg, style={"color": GRAY, "margin": 0, "fontSize": "0.8rem"})
+
+
+def _section_title(text: str, color: str = BLUE) -> html.H3:
+    return html.H3(
+        text,
+        style={"color": color, "marginTop": 0, "marginBottom": "12px", "fontSize": "0.85rem",
+               "letterSpacing": "0.05em", "textTransform": "uppercase"},
+    )
+
+
+def _stat_row(label: str, value: str, value_color: str | None = None) -> html.Div:
+    return html.Div(
+        [
+            html.Span(
+                label + ":",
+                style={"color": GRAY, "fontSize": "0.78rem", "display": "inline-block",
+                       "minWidth": "140px"},
+            ),
+            html.Span(
+                value,
+                style={"color": value_color or TEXT, "fontSize": "0.82rem",
+                       "fontWeight": "600" if value_color else "normal"},
+            ),
+        ],
+        style={"marginBottom": "7px"},
+    )
+
+
+# ── Layout ────────────────────────────────────────────────────────────────────
 
 def make_header() -> html.Div:
     return html.Div(
         [
             html.H1(
                 "MDR v5 — Bitcoin Cyclical Projection Model",
-                style={"margin": 0, "fontSize": "1.4rem", "color": "#42a5f5"},
+                style={"margin": 0, "fontSize": "1.4rem", "color": BLUE},
             ),
             html.P(
                 "Monetary Dilution → Liquidity Cycle → Bitcoin Price Projection",
-                style={"margin": 0, "color": "#9e9e9e", "fontSize": "0.85rem"},
+                style={"margin": 0, "color": GRAY, "fontSize": "0.85rem"},
             ),
         ],
-        style={**DARK_STYLE, "padding": "16px 24px", "borderBottom": "1px solid rgba(255,255,255,0.1)"},
-    )
-
-
-def make_status_bar() -> html.Div:
-    return html.Div(
-        [
-            html.Div(id="status-li", style={"flex": 1, **CARD_STYLE}),
-            html.Div(id="status-ci", style={"flex": 1, **CARD_STYLE}),
-            html.Div(id="status-lai", style={"flex": 1, **CARD_STYLE}),
-            html.Div(id="status-btc", style={"flex": 1, **CARD_STYLE}),
-        ],
-        style={"display": "flex", "flexWrap": "wrap"},
+        style={**DARK_STYLE, "padding": "16px 24px",
+               "borderBottom": f"1px solid {BORDER}"},
     )
 
 
 def make_controls() -> html.Div:
     return html.Div(
         [
-            html.Label("Log Scale:", style={"color": "#9e9e9e", "marginRight": "8px"}),
-            dcc.Checklist(
-                id="log-scale-toggle",
-                options=[{"label": " Price axis", "value": "log"}],
-                value=["log"],
-                style={"color": "#e0e0e0", "display": "inline-block"},
-            ),
-            html.Label("History:", style={"color": "#9e9e9e", "marginLeft": "24px", "marginRight": "8px"}),
-            dcc.Slider(
-                id="history-slider",
-                min=1,
-                max=10,
-                step=1,
-                value=5,
-                marks={i: f"{i}y" for i in range(1, 11)},
-                tooltip={"placement": "bottom"},
-                className="dark-slider",
-            ),
-            html.Label("Refresh:", style={"color": "#9e9e9e", "marginLeft": "24px", "marginRight": "8px"}),
             html.Button(
                 "↻ Refresh Data",
                 id="refresh-btn",
                 n_clicks=0,
                 style={
-                    "background": "rgba(66, 165, 245, 0.2)",
-                    "border": "1px solid #42a5f5",
-                    "color": "#42a5f5",
+                    "background": "rgba(66,165,245,0.15)",
+                    "border": f"1px solid {BLUE}",
+                    "color": BLUE,
                     "borderRadius": "4px",
-                    "padding": "4px 12px",
+                    "padding": "5px 14px",
                     "cursor": "pointer",
+                    "fontSize": "0.83rem",
                 },
+            ),
+            html.Label(
+                "History:",
+                style={"color": GRAY, "marginLeft": "24px", "marginRight": "8px",
+                       "fontSize": "0.83rem"},
+            ),
+            dcc.Slider(
+                id="history-slider",
+                min=1, max=10, step=1, value=5,
+                marks={i: f"{i}y" for i in range(1, 11)},
+                tooltip={"placement": "bottom"},
+                className="dark-slider",
+            ),
+            html.Label(
+                "Log scale:",
+                style={"color": GRAY, "marginLeft": "24px", "marginRight": "6px",
+                       "fontSize": "0.83rem"},
+            ),
+            dcc.Checklist(
+                id="log-scale-toggle",
+                options=[{"label": " price", "value": "log"}],
+                value=["log"],
+                style={"color": TEXT, "display": "inline-block", "fontSize": "0.83rem"},
             ),
             html.Div(
                 id="last-updated",
                 children="Click ↻ Refresh Data to load the model.",
-                style={"color": "#616161", "fontSize": "0.75rem", "marginLeft": "16px"},
+                style={"color": "#555", "fontSize": "0.73rem", "marginLeft": "24px"},
+            ),
+            dcc.Loading(
+                id="loading",
+                type="dot",
+                children=html.Div(id="loading-output"),
+                style={"marginLeft": "8px"},
             ),
         ],
-        style={**DARK_STYLE, "padding": "12px 24px", "display": "flex", "alignItems": "center",
-               "borderBottom": "1px solid rgba(255,255,255,0.08)"},
+        style={**DARK_STYLE, "padding": "10px 24px", "display": "flex",
+               "alignItems": "center", "borderBottom": f"1px solid rgba(255,255,255,0.06)"},
     )
 
 
@@ -140,67 +178,64 @@ app.layout = html.Div(
     [
         make_header(),
         make_controls(),
-        make_status_bar(),
 
-        # Main chart row
+        # ── Row 1: Scorecard ─────────────────────────────────────────────
+        html.Div(
+            [
+                html.Div(id="status-phase", style={"flex": 1, **CARD_STYLE}),
+                html.Div(id="status-li",    style={"flex": 1, **CARD_STYLE}),
+                html.Div(id="status-ci",    style={"flex": 1, **CARD_STYLE}),
+                html.Div(id="status-lai",   style={"flex": 1, **CARD_STYLE}),
+                html.Div(id="status-btc",   style={"flex": 1, **CARD_STYLE}),
+            ],
+            style={"display": "flex", "flexWrap": "wrap"},
+        ),
+
+        # ── Row 2: Component tables + Cycle timing ───────────────────────
         html.Div(
             [
                 html.Div(
-                    dcc.Graph(id="fan-chart", style={"height": "600px"}),
-                    style={**CARD_STYLE, "flex": "3"},
+                    [_section_title("Leading Index — Signals"), html.Div(id="li-component-table")],
+                    style={**CARD_STYLE, "flex": "1", "minWidth": "240px"},
                 ),
                 html.Div(
-                    [
-                        html.H3("Scenario Summary", style={"color": "#42a5f5", "marginTop": 0, "fontSize": "0.95rem"}),
-                        html.Div(id="scenario-table"),
-                    ],
+                    [_section_title("Lagging Index — Signals", AMBER), html.Div(id="lai-component-table")],
+                    style={**CARD_STYLE, "flex": "1", "minWidth": "240px"},
+                ),
+                html.Div(
+                    [_section_title("Cycle Timing", GREEN), html.Div(id="cycle-timing-block")],
                     style={**CARD_STYLE, "flex": "1", "minWidth": "220px"},
                 ),
             ],
-            style={"display": "flex"},
+            style={"display": "flex", "flexWrap": "wrap"},
         ),
 
-        # Second row: Wavelet scalogram + CCF
+        # ── Row 3: Projection table + Model stats ────────────────────────
         html.Div(
             [
                 html.Div(
-                    dcc.Graph(id="wavelet-chart", style={"height": "320px"}),
-                    style={**CARD_STYLE, "flex": "2"},
+                    [_section_title("Price Projections"), html.Div(id="scenario-table")],
+                    style={**CARD_STYLE, "flex": "3", "minWidth": "340px"},
                 ),
                 html.Div(
-                    dcc.Graph(id="ccf-chart", style={"height": "320px"}),
-                    style={**CARD_STYLE, "flex": "1"},
+                    [_section_title("Model Stats", GRAY), html.Div(id="model-stats-block")],
+                    style={**CARD_STYLE, "flex": "1", "minWidth": "200px"},
                 ),
             ],
-            style={"display": "flex"},
+            style={"display": "flex", "flexWrap": "wrap"},
         ),
 
-        # Third row: LI component breakdown
+        # ── Row 4: Fan chart (single chart) ──────────────────────────────
         html.Div(
-            [
-                html.Div(
-                    dcc.Graph(id="li-components-chart", style={"height": "280px"}),
-                    style={**CARD_STYLE, "flex": "2"},
-                ),
-                html.Div(
-                    dcc.Graph(id="maturity-gauge", style={"height": "280px"}),
-                    style={**CARD_STYLE, "flex": "1"},
-                ),
-            ],
-            style={"display": "flex"},
+            [_section_title("BTC Price Projection — Fan Chart"),
+             dcc.Graph(id="fan-chart", style={"height": "420px"})],
+            style={**CARD_STYLE},
         ),
 
-        # Hidden store for model output
         dcc.Store(id="model-store"),
-        dcc.Loading(
-            id="loading",
-            type="circle",
-            children=html.Div(id="loading-output"),
-        ),
     ],
     style={**DARK_STYLE, "minHeight": "100vh"},
 )
-
 
 # ── Data loading helpers ──────────────────────────────────────────────────────
 
@@ -218,7 +253,6 @@ def _resolve_config_path() -> str:
     if os.path.exists(file_path):
         return file_path
 
-    # Generate a temporary config from env vars so the pipeline can start.
     fred_key = os.environ.get("FRED_API_KEY", "")
     if not fred_key:
         raise EnvironmentError(
@@ -227,9 +261,7 @@ def _resolve_config_path() -> str:
         )
 
     import tempfile, yaml
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", delete=False
-    )
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
     yaml.dump(
         {
             "fred": {"api_key": fred_key},
@@ -243,14 +275,8 @@ def _resolve_config_path() -> str:
 
 
 def _load_model_outputs(config_path: str | None = None, force_refresh: bool = False):
-    """
-    Run the full model pipeline and return all outputs as a dict.
-
-    This is called lazily on first render or on refresh.
-    """
+    """Run the full model pipeline and return all outputs as a dict."""
     from src.data.pipeline import DataPipeline
-
-    config_path = config_path or _resolve_config_path()
     from src.indicators.leading import build_leading_index
     from src.indicators.coincident import build_coincident_index
     from src.indicators.lagging import build_lagging_index
@@ -259,6 +285,8 @@ def _load_model_outputs(config_path: str | None = None, force_refresh: bool = Fa
     from src.spectral.coherence import compute_coherence
     from src.projection.ccf import compute_ccf, estimate_forecast_horizon
     from src.projection.scenarios import build_scenario_tree
+
+    config_path = config_path or _resolve_config_path()
 
     logger.info("Loading data pipeline...")
     pipeline = DataPipeline.from_config(config_path)
@@ -320,7 +348,7 @@ def _load_model_outputs(config_path: str | None = None, force_refresh: bool = Fa
 
 # ── Callbacks ─────────────────────────────────────────────────────────────────
 
-_model_cache: dict = {}  # Simple in-process cache
+_model_cache: dict = {}
 
 
 @app.callback(
@@ -328,14 +356,13 @@ _model_cache: dict = {}  # Simple in-process cache
     Output("last-updated", "children"),
     Output("loading-output", "children"),
     Input("refresh-btn", "n_clicks"),
-    prevent_initial_call=True,  # never auto-run on page load; user must click Refresh
+    prevent_initial_call=True,
 )
 def load_model(n_clicks):
     """Load or refresh the model outputs (triggered only by the Refresh button)."""
     global _model_cache
     from datetime import datetime
 
-    # If cache is already populated this is a re-run, so bypass the data cache.
     force_data = bool(_model_cache)
     try:
         _model_cache = _load_model_outputs(config_path=None, force_refresh=force_data)
@@ -346,6 +373,300 @@ def load_model(n_clicks):
         return {"loaded": False, "error": str(exc)}, "Load failed", ""
 
 
+# ── Scorecard ─────────────────────────────────────────────────────────────────
+
+@app.callback(
+    Output("status-phase", "children"),
+    Output("status-li",    "children"),
+    Output("status-ci",    "children"),
+    Output("status-lai",   "children"),
+    Output("status-btc",   "children"),
+    Input("model-store", "data"),
+)
+def update_scorecard(store_data):
+    empty = _placeholder()
+    if not store_data or not store_data.get("loaded"):
+        return empty, empty, empty, empty, empty
+
+    out = _model_cache
+
+    def card(label, big_text, sub, color):
+        return html.Div([
+            html.P(label,    style={"color": GRAY, "margin": "0 0 4px 0", "fontSize": "0.72rem", "letterSpacing": "0.06em", "textTransform": "uppercase"}),
+            html.P(big_text, style={"color": color, "margin": "0 0 4px 0", "fontSize": "1.6rem", "fontWeight": "700", "lineHeight": "1"}),
+            html.P(sub,      style={"color": GRAY, "margin": 0, "fontSize": "0.72rem"}),
+        ])
+
+    btc_tp   = out["btc_tp"]
+    last_d   = out["btc_price"].index[-1]
+    phase    = btc_tp.phase_at(last_d)
+    phase_color = GREEN if phase == "expansion" else RED
+
+    li_val  = float(out["li_result"].index.iloc[-1])
+    ci_val  = float(out["ci_result"].index.iloc[-1])
+    lai_val = float(out["lai_result"].maturity_score.dropna().iloc[-1])
+    btc_val = float(out["btc_price"].iloc[-1])
+
+    # LI momentum (3-month)
+    from src.indicators.leading import compute_li_momentum
+    li_mom = compute_li_momentum(out["li_result"].index).iloc[-1]
+    li_arrow = " ↑" if li_mom > 0 else " ↓"
+    li_color = GREEN if li_val > 50 else RED
+
+    ci_color  = GREEN if ci_val > 50 else RED
+    lai_color = RED if lai_val > 65 else (AMBER if lai_val > 40 else GREEN)
+    lai_stage = "Late Cycle" if lai_val > 65 else ("Mid Cycle" if lai_val > 40 else "Early Recovery")
+
+    # CI phase label
+    from src.indicators.coincident import get_cycle_phase_from_ci
+    ci_phases = get_cycle_phase_from_ci(out["ci_result"].index)
+    ci_phase_label = str(ci_phases.iloc[-1]).replace("_", " ").title()
+
+    return (
+        card("Cycle Phase",       phase.upper(),            f"BTC Bry-Boschan",          phase_color),
+        card("Leading Index",     f"{li_val:.1f}/100{li_arrow}", "Monetary liquidity",    li_color),
+        card("Coincident Index",  f"{ci_val:.1f}/100",      ci_phase_label,              ci_color),
+        card("Lagging Index",     f"{lai_val:.1f}/100",     lai_stage,                   lai_color),
+        card("BTC Price",         f"${btc_val:,.0f}",       last_d.strftime("%b %Y"),    TEXT),
+    )
+
+
+# ── Component signal tables ───────────────────────────────────────────────────
+
+def _signal_table(components_df: pd.DataFrame, raw_df: pd.DataFrame | None = None) -> html.Table:
+    """Render a compact signal table from the latest row of a binary components df."""
+    latest_sig = components_df.iloc[-1]
+    latest_raw = raw_df.iloc[-1] if raw_df is not None else None
+
+    rows = []
+    for col in latest_sig.index:
+        sig = bool(latest_sig[col])
+        dot_color = GREEN if sig else RED
+        raw_txt = ""
+        if latest_raw is not None and col in latest_raw.index:
+            v = latest_raw[col]
+            raw_txt = f"  {v:+.2f}" if pd.notna(v) else ""
+
+        rows.append(html.Tr([
+            html.Td(html.Span("●", style={"color": dot_color, "fontSize": "1em"}),
+                    style={"padding": "3px 6px 3px 0", "width": "16px", "verticalAlign": "middle"}),
+            html.Td(col, style={"color": TEXT, "padding": "3px 0", "fontSize": "0.77rem", "verticalAlign": "middle"}),
+            html.Td(raw_txt, style={"color": GRAY, "padding": "3px 0 3px 8px", "fontSize": "0.72rem",
+                                    "textAlign": "right", "verticalAlign": "middle", "fontVariantNumeric": "tabular-nums"}),
+        ]))
+
+    return html.Table(rows, style={"width": "100%", "borderCollapse": "collapse"})
+
+
+@app.callback(
+    Output("li-component-table",  "children"),
+    Output("lai-component-table", "children"),
+    Input("model-store", "data"),
+)
+def update_component_tables(store_data):
+    empty = _placeholder()
+    if not store_data or not store_data.get("loaded"):
+        return empty, empty
+
+    out = _model_cache
+    li_val   = float(out["li_result"].index.iloc[-1])
+    lai_val  = float(out["lai_result"].maturity_score.dropna().iloc[-1])
+    li_color = GREEN if li_val > 50 else RED
+
+    from src.indicators.leading import compute_li_momentum
+    li_mom = float(compute_li_momentum(out["li_result"].index).iloc[-1])
+
+    li_table = html.Div([
+        _signal_table(out["li_result"].components, out["li_result"].raw_components),
+        html.Div(
+            [
+                _stat_row("Score", f"{li_val:.1f} / 100", li_color),
+                _stat_row("3M Momentum", f"{li_mom:+.1f}", GREEN if li_mom > 0 else RED),
+            ],
+            style={"marginTop": "12px", "borderTop": f"1px solid {BORDER}", "paddingTop": "10px"},
+        ),
+    ])
+
+    lai_color = RED if lai_val > 65 else (AMBER if lai_val > 40 else GREEN)
+    lai_stage = "Late Cycle" if lai_val > 65 else ("Mid Cycle" if lai_val > 40 else "Early Recovery")
+    lai_table = html.Div([
+        _signal_table(out["lai_result"].components, out["lai_result"].raw_components),
+        html.Div(
+            [
+                _stat_row("Maturity Score", f"{lai_val:.1f} / 100", lai_color),
+                _stat_row("Stage", lai_stage, lai_color),
+            ],
+            style={"marginTop": "12px", "borderTop": f"1px solid {BORDER}", "paddingTop": "10px"},
+        ),
+    ])
+
+    return li_table, lai_table
+
+
+# ── Cycle timing ──────────────────────────────────────────────────────────────
+
+@app.callback(
+    Output("cycle-timing-block", "children"),
+    Input("model-store", "data"),
+)
+def update_cycle_timing(store_data):
+    if not store_data or not store_data.get("loaded"):
+        return _placeholder()
+
+    out       = _model_cache
+    btc_tp    = out["btc_tp"]
+    dom_stats = out["dom_stats"]
+    horizon   = out["horizon"]
+    last_date = out["btc_price"].index[-1]
+
+    phase = btc_tp.phase_at(last_date)
+    phase_color = GREEN if phase == "expansion" else RED
+
+    # Last turning point
+    all_turns = sorted(
+        [(d, "peak") for d in btc_tp.peaks] + [(d, "trough") for d in btc_tp.troughs]
+    )
+    if all_turns:
+        last_tp_date, last_tp_type = all_turns[-1]
+        phase_months = max(1, round((last_date - last_tp_date).days / 30.44))
+        last_tp_str  = f"{last_tp_date.strftime('%b %Y')} ({last_tp_type})"
+    else:
+        phase_months = None
+        last_tp_str  = "N/A"
+
+    dom_period = dom_stats["recent_dominant_period"]
+    lag        = int(horizon["ccf_lag_months"])
+
+    # Cycle progress through current phase (half-period = one phase)
+    half = dom_period / 2
+    if phase_months:
+        progress_pct = min(99, round(phase_months / half * 100))
+        bar_filled   = round(progress_pct / 10)  # 0-10 blocks
+        bar          = "█" * bar_filled + "░" * (10 - bar_filled) + f" {progress_pct}%"
+    else:
+        bar = "N/A"
+
+    # Estimated next turning point
+    if all_turns and phase_months:
+        months_left = max(1, round(half - phase_months))
+        est_next_date = last_date + pd.DateOffset(months=months_left)
+        next_event = "peak" if phase == "expansion" else "trough"
+        est_str = f"~{est_next_date.strftime('%b %Y')} ({next_event})"
+    else:
+        est_str = "N/A"
+
+    rows: list[html.Div] = [
+        _stat_row("Current Phase",   phase.upper(),        phase_color),
+        _stat_row("Phase Duration",  f"{phase_months}m" if phase_months else "N/A"),
+        _stat_row("Phase Progress",  bar),
+        _stat_row("Last Event",      last_tp_str),
+        _stat_row("Est. Next Event", est_str,              AMBER),
+        html.Div(style={"height": "10px"}),  # spacer
+        _stat_row("Dominant Cycle",  f"{dom_period:.0f} months"),
+        _stat_row("LI Lead Time",    f"{lag} months"),
+        _stat_row("Data Through",    last_date.strftime("%b %Y")),
+    ]
+    return rows
+
+
+# ── Projection scenario table ─────────────────────────────────────────────────
+
+@app.callback(
+    Output("scenario-table", "children"),
+    Input("model-store", "data"),
+)
+def update_scenario_table(store_data):
+    if not store_data or not store_data.get("loaded"):
+        return _placeholder()
+
+    tree = _model_cache["tree"]
+    current = tree.current_price
+
+    col_style  = {"color": GRAY, "padding": "5px 12px", "fontSize": "0.72rem",
+                  "letterSpacing": "0.06em", "textTransform": "uppercase",
+                  "borderBottom": f"1px solid {BORDER}"}
+    cell_style = {"color": TEXT, "padding": "7px 12px", "fontSize": "0.82rem",
+                  "fontVariantNumeric": "tabular-nums"}
+
+    header = html.Tr([
+        html.Th("Scenario",    style=col_style),
+        html.Th("Probability", style=col_style),
+        html.Th("Target",      style=col_style),
+        html.Th("Return",      style=col_style),
+        html.Th("Horizon",     style=col_style),
+        html.Th("Peak / Trough Date", style=col_style),
+    ])
+
+    scenario_colors = {"bull": GREEN, "base": BLUE, "bear": RED}
+    rows = [header]
+    for key in ("bull", "base", "bear"):
+        sc    = tree.scenarios[key]
+        color = scenario_colors[key]
+        ret_color = GREEN if sc.return_pct >= 0 else RED
+        rows.append(html.Tr([
+            html.Td(key.upper(),                      style={**cell_style, "color": color, "fontWeight": "700"}),
+            html.Td(f"{sc.probability * 100:.0f}%",   style=cell_style),
+            html.Td(f"${sc.peak_price:,.0f}",         style=cell_style),
+            html.Td(f"{sc.return_pct:+.1f}%",         style={**cell_style, "color": ret_color}),
+            html.Td(f"{sc.horizon_months} months",    style=cell_style),
+            html.Td(sc.peak_date.strftime("%b %Y"),   style=cell_style),
+        ]))
+
+    # Expected value row
+    ev = sum(sc.peak_price * sc.probability for sc in tree.scenarios.values())
+    ev_ret = (ev / current - 1) * 100
+    ev_color = GREEN if ev_ret >= 0 else RED
+    rows.append(html.Tr([
+        html.Td("EV",                  style={**cell_style, "color": GRAY, "fontStyle": "italic",
+                                              "borderTop": f"1px solid {BORDER}"}),
+        html.Td("—",                   style={**cell_style, "borderTop": f"1px solid {BORDER}"}),
+        html.Td(f"${ev:,.0f}",         style={**cell_style, "borderTop": f"1px solid {BORDER}"}),
+        html.Td(f"{ev_ret:+.1f}%",     style={**cell_style, "color": ev_color, "borderTop": f"1px solid {BORDER}"}),
+        html.Td("—",                   style={**cell_style, "borderTop": f"1px solid {BORDER}"}),
+        html.Td("—",                   style={**cell_style, "borderTop": f"1px solid {BORDER}"}),
+    ]))
+
+    return html.Table(rows, style={"width": "100%", "borderCollapse": "collapse"})
+
+
+# ── Model stats panel ─────────────────────────────────────────────────────────
+
+@app.callback(
+    Output("model-stats-block", "children"),
+    Input("model-store", "data"),
+)
+def update_model_stats(store_data):
+    if not store_data or not store_data.get("loaded"):
+        return _placeholder()
+
+    out      = _model_cache
+    ccf      = out["ccf_result"]
+    dom      = out["dom_stats"]
+    tree     = out["tree"]
+    ci_val   = float(out["ci_result"].index.iloc[-1])
+    last_d   = out["btc_price"].index[-1]
+
+    from src.indicators.coincident import get_cycle_phase_from_ci
+    ci_phase = str(get_cycle_phase_from_ci(out["ci_result"].index).iloc[-1]).replace("_", " ").title()
+
+    rows = [
+        _stat_row("CI Value",         f"{ci_val:.1f} / 100", GREEN if ci_val > 50 else RED),
+        _stat_row("CI Phase",         ci_phase),
+        html.Div(style={"height": "8px"}),
+        _stat_row("CCF Peak Lag",     f"{ccf.peak_lag} months"),
+        _stat_row("CCF Correlation",  f"{ccf.peak_correlation:.3f}"),
+        html.Div(style={"height": "8px"}),
+        _stat_row("Dominant Cycle",   f"{dom['recent_dominant_period']:.0f} months"),
+        _stat_row("Cycle Range",      f"{dom.get('min_dominant_period', 0):.0f}–{dom.get('max_dominant_period', 0):.0f}m"),
+        html.Div(style={"height": "8px"}),
+        _stat_row("Current Price",    f"${tree.current_price:,.0f}"),
+        _stat_row("Projection From",  tree.projection_date.strftime("%b %Y")),
+    ]
+    return rows
+
+
+# ── Fan chart ─────────────────────────────────────────────────────────────────
+
 @app.callback(
     Output("fan-chart", "figure"),
     Input("model-store", "data"),
@@ -354,12 +675,15 @@ def load_model(n_clicks):
 )
 def update_fan_chart(store_data, log_toggle, history_years):
     if not store_data or not store_data.get("loaded"):
-        return go.Figure()
+        return go.Figure(layout=go.Layout(
+            paper_bgcolor=BG, plot_bgcolor=BG2, template="plotly_dark",
+            margin=dict(l=40, r=20, t=20, b=40),
+        ))
 
     from src.projection.fan_chart import build_fan_chart
 
     out = _model_cache
-    fig = build_fan_chart(
+    return build_fan_chart(
         btc_price=out["btc_price"],
         scenario_tree=out["tree"],
         li_index=out["li_result"].index,
@@ -367,304 +691,6 @@ def update_fan_chart(store_data, log_toggle, history_years):
         lai_index=out["lai_result"].index,
         turning_points=out["btc_tp"],
         log_scale="log" in (log_toggle or []),
-    )
-    return fig
-
-
-@app.callback(
-    Output("wavelet-chart", "figure"),
-    Input("model-store", "data"),
-    Input("history-slider", "value"),
-)
-def update_wavelet_chart(store_data, history_years):
-    if not store_data or not store_data.get("loaded"):
-        return go.Figure()
-
-    cwt = _model_cache["cwt_result"]
-    time_index = cwt.time_index
-    periods = cwt.periods
-    power = cwt.power
-
-    # Log-scale power for display
-    log_power = np.log10(power + 1e-12)
-
-    cutoff = time_index[-1] - pd.DateOffset(years=history_years or 5)
-    time_mask = time_index >= cutoff
-    log_power_plot = log_power[:, time_mask]
-    time_plot = time_index[time_mask]
-
-    fig = go.Figure(
-        go.Heatmap(
-            x=time_plot,
-            y=periods,
-            z=log_power_plot,
-            colorscale="RdBu_r",
-            showscale=True,
-            colorbar=dict(title="log₁₀ Power"),
-        )
-    )
-
-    # Dominant period overlay
-    dom_period = _model_cache["cwt_result"].dominant_period
-    dom_plot = dom_period[dom_period.index >= cutoff]
-    fig.add_trace(
-        go.Scatter(
-            x=dom_plot.index,
-            y=dom_plot.values,
-            mode="lines",
-            name="Dominant period",
-            line=dict(color="#ffa726", width=2),
-        )
-    )
-
-    fig.update_layout(
-        title=f"Wavelet Power Spectrum (Morlet, ω₀=6) — Dominant: {cwt.dominant_period.iloc[-1]:.0f} months",
-        template="plotly_dark",
-        paper_bgcolor="#1a1a2e",
-        plot_bgcolor="#16213e",
-        yaxis_title="Period (months)",
-        yaxis_type="log",
-        yaxis_tickvals=[12, 24, 48, 60, 96, 120],
-        yaxis_ticktext=["12m", "24m", "48m", "60m", "96m", "120m"],
-        height=320,
-        margin=dict(l=60, r=20, t=50, b=40),
-    )
-    return fig
-
-
-@app.callback(
-    Output("ccf-chart", "figure"),
-    Input("model-store", "data"),
-)
-def update_ccf_chart(store_data):
-    if not store_data or not store_data.get("loaded"):
-        return go.Figure()
-
-    ccf = _model_cache["ccf_result"]
-    lags = ccf.lags
-    corrs = ccf.correlations
-    ci_lo, ci_hi = ccf.confidence_bands
-
-    colors = [
-        "#26a69a" if (l >= 0 and c > 0) else
-        "#ef5350" if (l >= 0 and c < 0) else
-        "rgba(255,255,255,0.2)"
-        for l, c in zip(lags, corrs)
-    ]
-
-    fig = go.Figure(
-        go.Bar(
-            x=lags,
-            y=corrs,
-            marker_color=colors,
-            name="CCF",
-        )
-    )
-    # Confidence bands
-    fig.add_hline(y=ci_hi, line_dash="dot", line_color="rgba(255,255,255,0.3)")
-    fig.add_hline(y=ci_lo, line_dash="dot", line_color="rgba(255,255,255,0.3)")
-    # Peak lag marker
-    fig.add_vline(
-        x=ccf.peak_lag,
-        line_color="#ffa726",
-        line_dash="dash",
-        annotation_text=f"Peak: {ccf.peak_lag}m",
-        annotation_position="top right",
-    )
-
-    fig.update_layout(
-        title=f"CCF: LI → BTC (peak lag = {ccf.peak_lag} months, r={ccf.peak_correlation:.2f})",
-        template="plotly_dark",
-        paper_bgcolor="#1a1a2e",
-        plot_bgcolor="#16213e",
-        xaxis_title="Lag (months, positive = LI leads BTC)",
-        yaxis_title="Correlation",
-        height=320,
-        margin=dict(l=60, r=20, t=50, b=40),
-        showlegend=False,
-    )
-    return fig
-
-
-@app.callback(
-    Output("li-components-chart", "figure"),
-    Input("model-store", "data"),
-    Input("history-slider", "value"),
-)
-def update_li_components(store_data, history_years):
-    if not store_data or not store_data.get("loaded"):
-        return go.Figure()
-
-    li_result = _model_cache["li_result"]
-    cutoff = _model_cache["btc_price"].index[-1] - pd.DateOffset(years=history_years or 5)
-    comps = li_result.components[li_result.components.index >= cutoff]
-
-    fig = go.Figure()
-
-    # Heatmap of binary signals
-    fig.add_trace(
-        go.Heatmap(
-            x=comps.index,
-            y=comps.columns.tolist(),
-            z=comps.values.T,
-            colorscale=[[0, "#ef5350"], [1, "#26a69a"]],
-            showscale=False,
-            zmin=0,
-            zmax=1,
-        )
-    )
-
-    # LI overlay
-    li_plot = li_result.index[li_result.index.index >= cutoff]
-    fig.add_trace(
-        go.Scatter(
-            x=li_plot.index,
-            y=li_plot.values / 100.0 * 6 - 0.5,  # scale to heatmap row space
-            mode="lines",
-            name="LI (scaled)",
-            line=dict(color="#ffa726", width=2),
-            yaxis="y",
-        )
-    )
-
-    fig.update_layout(
-        title=f"LI Component Signals (green=expanding, red=contracting) | Current LI: {li_result.index.iloc[-1]:.1f}",
-        template="plotly_dark",
-        paper_bgcolor="#1a1a2e",
-        plot_bgcolor="#16213e",
-        height=280,
-        margin=dict(l=120, r=20, t=50, b=40),
-        showlegend=False,
-    )
-    return fig
-
-
-@app.callback(
-    Output("maturity-gauge", "figure"),
-    Input("model-store", "data"),
-)
-def update_maturity_gauge(store_data):
-    if not store_data or not store_data.get("loaded"):
-        return go.Figure()
-
-    lai = _model_cache["lai_result"]
-    maturity = float(lai.maturity_score.dropna().iloc[-1]) if len(lai.maturity_score.dropna()) else 50.0
-    li_val = float(_model_cache["li_result"].index.iloc[-1]) if len(_model_cache["li_result"].index) else 50.0
-    ci_val = float(_model_cache["ci_result"].index.iloc[-1]) if len(_model_cache["ci_result"].index) else 50.0
-
-    fig = go.Figure()
-
-    for val, label, row_y in [
-        (li_val, "LI", 0.85),
-        (ci_val, "CI", 0.5),
-        (maturity, "LaI", 0.15),
-    ]:
-        color = "#26a69a" if val > 50 else "#ef5350"
-        fig.add_trace(
-            go.Indicator(
-                mode="gauge+number",
-                value=val,
-                title={"text": label, "font": {"size": 14}},
-                gauge={
-                    "axis": {"range": [0, 100]},
-                    "bar": {"color": color},
-                    "steps": [
-                        {"range": [0, 33], "color": "rgba(239,83,80,0.2)"},
-                        {"range": [33, 67], "color": "rgba(255,167,38,0.1)"},
-                        {"range": [67, 100], "color": "rgba(38,166,154,0.2)"},
-                    ],
-                    "threshold": {
-                        "line": {"color": "white", "width": 2},
-                        "thickness": 0.8,
-                        "value": 50,
-                    },
-                },
-                domain={"x": [0, 1], "y": [row_y - 0.12, row_y + 0.12]},
-            )
-        )
-
-    fig.update_layout(
-        template="plotly_dark",
-        paper_bgcolor="#1a1a2e",
-        plot_bgcolor="#16213e",
-        height=280,
-        margin=dict(l=10, r=10, t=30, b=10),
-        title="Index Gauges",
-    )
-    return fig
-
-
-@app.callback(
-    Output("status-li", "children"),
-    Output("status-ci", "children"),
-    Output("status-lai", "children"),
-    Output("status-btc", "children"),
-    Input("model-store", "data"),
-)
-def update_status_bar(store_data):
-    if not store_data or not store_data.get("loaded"):
-        empty = html.P("Loading...", style={"color": "#9e9e9e"})
-        return empty, empty, empty, empty
-
-    out = _model_cache
-
-    def make_card(label, value, interpretation, color):
-        return html.Div([
-            html.P(label, style={"color": "#9e9e9e", "margin": "0 0 4px 0", "fontSize": "0.75rem"}),
-            html.P(f"{value:.1f}" if isinstance(value, float) else str(value),
-                   style={"color": color, "margin": 0, "fontSize": "1.5rem", "fontWeight": "bold"}),
-            html.P(interpretation, style={"color": "#9e9e9e", "margin": 0, "fontSize": "0.7rem"}),
-        ])
-
-    li_val = float(out["li_result"].index.iloc[-1])
-    ci_val = float(out["ci_result"].index.iloc[-1])
-    lai_val = float(out["lai_result"].maturity_score.dropna().iloc[-1])
-    btc_val = float(out["btc_price"].iloc[-1])
-
-    li_color = "#26a69a" if li_val > 50 else "#ef5350"
-    ci_color = "#26a69a" if ci_val > 50 else "#ef5350"
-    lai_color = "#ef5350" if lai_val > 65 else ("#ffa726" if lai_val > 40 else "#26a69a")
-    btc_color = "#ffffff"
-
-    li_interp = "Bullish (expanding)" if li_val > 50 else "Bearish (contracting)"
-    ci_interp = "Cycle expanding" if ci_val > 50 else "Cycle contracting"
-    lai_interp = "Late cycle" if lai_val > 65 else ("Mid cycle" if lai_val > 40 else "Early recovery")
-    btc_interp = f"Lag est: {out['horizon']['ccf_lag_months']}m | Cycle: {out['dom_stats']['recent_dominant_period']:.0f}m"
-
-    return (
-        make_card("Leading Index", li_val, li_interp, li_color),
-        make_card("Coincident Index", ci_val, ci_interp, ci_color),
-        make_card("Lagging Index (Maturity)", lai_val, lai_interp, lai_color),
-        make_card("BTC Price", f"${btc_val:,.0f}", btc_interp, btc_color),
-    )
-
-
-@app.callback(
-    Output("scenario-table", "children"),
-    Input("model-store", "data"),
-)
-def update_scenario_table(store_data):
-    if not store_data or not store_data.get("loaded"):
-        return html.P("Loading...", style={"color": "#9e9e9e"})
-
-    from src.projection.scenarios import scenario_summary
-    tree = _model_cache["tree"]
-    df = scenario_summary(tree)
-
-    rows = [
-        html.Tr([html.Th(col, style={"color": "#9e9e9e", "padding": "4px 8px"}) for col in [""] + df.columns.tolist()]),
-    ]
-    scenario_colors_map = {"Bull": "#26a69a", "Base": "#42a5f5", "Bear": "#ef5350"}
-    for idx, row in df.iterrows():
-        color = scenario_colors_map.get(str(idx), "#e0e0e0")
-        cells = [html.Td(str(idx), style={"color": color, "padding": "4px 8px", "fontWeight": "bold"})]
-        for val in row.values:
-            cells.append(html.Td(str(val), style={"color": "#e0e0e0", "padding": "4px 8px"}))
-        rows.append(html.Tr(cells))
-
-    return html.Table(
-        rows,
-        style={"width": "100%", "borderCollapse": "collapse", "fontSize": "0.8rem"},
     )
 
 
@@ -680,8 +706,6 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8050)
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
-
-    logger.info("Starting MDR v5 dashboard on port %d", args.port)
     app.run(debug=args.debug, port=args.port, host="0.0.0.0")
 
 
