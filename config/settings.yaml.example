@@ -1,0 +1,31 @@
+# MDR v5 — Configuration Template
+# Copy to settings.yaml and fill in your values. Never commit settings.yaml.
+
+fred:
+  api_key: "YOUR_FRED_API_KEY_HERE"  # https://fred.stlouisfed.org/docs/api/api_key.html
+
+data:
+  cache_dir: "data/cache"
+  start_date: "2010-01-01"
+  # Monthly frequency is the base for all series
+
+model:
+  leading:
+    ma_window: 6          # 6-month MA for binary expansion signal
+    n_components: 7
+  coincident:
+    k_factors: 2
+    factor_order: 2
+  lagging:
+    ma_window: 6
+    n_components: 5
+  bry_boschan:
+    min_phase_months: 6
+    min_cycle_months: 15
+    smooth_window: 12
+  wavelet:
+    omega0: 6             # Morlet wavelet parameter
+    min_period_months: 12
+    max_period_months: 120
+  ccf:
+    max_lag_months: 24
