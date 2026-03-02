@@ -125,7 +125,11 @@ def make_controls() -> html.Div:
                     "cursor": "pointer",
                 },
             ),
-            html.Div(id="last-updated", style={"color": "#616161", "fontSize": "0.75rem", "marginLeft": "16px"}),
+            html.Div(
+                id="last-updated",
+                children="Click ↻ Refresh Data to load the model.",
+                style={"color": "#616161", "fontSize": "0.75rem", "marginLeft": "16px"},
+            ),
         ],
         style={**DARK_STYLE, "padding": "12px 24px", "display": "flex", "alignItems": "center",
                "borderBottom": "1px solid rgba(255,255,255,0.08)"},
@@ -324,17 +328,17 @@ _model_cache: dict = {}  # Simple in-process cache
     Output("last-updated", "children"),
     Output("loading-output", "children"),
     Input("refresh-btn", "n_clicks"),
-    prevent_initial_call=False,
+    prevent_initial_call=True,  # never auto-run on page load; user must click Refresh
 )
 def load_model(n_clicks):
-    """Load or refresh the model outputs."""
+    """Load or refresh the model outputs (triggered only by the Refresh button)."""
     global _model_cache
     from datetime import datetime
 
-    force = n_clicks > 0 and bool(_model_cache)
+    # If cache is already populated this is a re-run, so bypass the data cache.
+    force_data = bool(_model_cache)
     try:
-        if not _model_cache or force:
-            _model_cache = _load_model_outputs(config_path=None, force_refresh=force)
+        _model_cache = _load_model_outputs(config_path=None, force_refresh=force_data)
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         return {"loaded": True}, f"Last updated: {now}", ""
     except Exception as exc:
