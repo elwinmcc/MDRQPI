@@ -7,7 +7,6 @@ fredapi>=0.5.0
 requests>=2.31.0
 plotly>=5.17.0
 dash>=2.14.0
-dash-bootstrap-components>=1.5.0
 pyarrow>=14.0.0
 pyyaml>=6.0.0
 python-dateutil>=2.8.2
